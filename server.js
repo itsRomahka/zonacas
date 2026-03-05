@@ -82,6 +82,10 @@ async function initDB() {
       [OWNER_ID, 'vladyslav_owner', 'Владислав', 1000000, 'owner']
     );
     console.log('✅ Власника додано в базу');
+  } else {
+    // Оновлюємо роль до owner, якщо чомусь не та
+    await db.run('UPDATE users SET role = ? WHERE id = ?', ['owner', OWNER_ID]);
+    console.log('✅ Власник вже є, роль оновлено');
   }
 
   // Додаємо безкоштовний кейс
@@ -122,6 +126,21 @@ app.post('/api/user', async (req, res) => {
     }
     
     res.json(user);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/leaderboard', async (req, res) => {
+  try {
+    const leaderboard = await db.all(`
+      SELECT first_name, username, (total_win - total_bet) as profit, balance
+      FROM users 
+      WHERE total_bet > 0 OR total_win > 0
+      ORDER BY profit DESC 
+      LIMIT 10
+    `);
+    res.json(leaderboard);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -236,9 +255,18 @@ io.on('connection', (socket) => {
     try {
       const user = await db.get('SELECT * FROM users WHERE id = ?', userId);
       
-      if (!user || user.balance < amount) return;
-      if (gameState.status !== 'waiting') return;
-      if (user.banned_until > Math.floor(Date.now() / 1000)) return;
+      if (!user || user.balance < amount) {
+        socket.emit('notification', { type: 'error', message: 'Недостатньо коштів' });
+        return;
+      }
+      if (gameState.status !== 'waiting') {
+        socket.emit('notification', { type: 'error', message: 'Зараз не можна ставити' });
+        return;
+      }
+      if (user.banned_until > Math.floor(Date.now() / 1000)) {
+        socket.emit('notification', { type: 'error', message: 'Ви забанені' });
+        return;
+      }
       
       await db.run('UPDATE users SET balance = balance - ? WHERE id = ?', [amount, userId]);
       
@@ -251,6 +279,7 @@ io.on('connection', (socket) => {
       });
       
       io.emit('gameState', gameState);
+      socket.emit('notification', { type: 'success', message: 'Ставку прийнято' });
     } catch (error) {
       console.error('Помилка ставки:', error);
     }
@@ -258,10 +287,16 @@ io.on('connection', (socket) => {
   
   socket.on('cashOut', async ({ userId }) => {
     try {
-      if (gameState.status !== 'running') return;
+      if (gameState.status !== 'running') {
+        socket.emit('notification', { type: 'error', message: 'Зараз не можна вивести' });
+        return;
+      }
       
       const player = gameState.players.find(p => p.userId === userId);
-      if (!player || player.cashedOut) return;
+      if (!player || player.cashedOut) {
+        socket.emit('notification', { type: 'error', message: 'Ставка не знайдена' });
+        return;
+      }
       
       player.cashedOut = true;
       player.cashedAt = gameState.multiplier;
@@ -274,6 +309,7 @@ io.on('connection', (socket) => {
       );
       
       socket.emit('cashOutSuccess', { winAmount });
+      socket.emit('notification', { type: 'success', message: `Ви виграли ${winAmount} монет!` });
       io.emit('gameState', gameState);
     } catch (error) {
       console.error('Помилка виводу:', error);
@@ -284,7 +320,10 @@ io.on('connection', (socket) => {
   socket.on('adminGetUsers', async ({ adminId }) => {
     try {
       const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
-      if (!admin || admin.role === 'user') return;
+      if (!admin || admin.role === 'user') {
+        socket.emit('notification', { type: 'error', message: 'Немає прав' });
+        return;
+      }
       
       const users = await db.all('SELECT id, username, first_name, balance, role, banned_until, muted_until FROM users ORDER BY role DESC, balance DESC LIMIT 100');
       socket.emit('adminUsersList', users);
@@ -296,10 +335,14 @@ io.on('connection', (socket) => {
   socket.on('adminSetBalance', async ({ adminId, userId, balance }) => {
     try {
       const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
-      if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner' && admin.role !== 'helper')) return;
+      if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner' && admin.role !== 'helper')) {
+        socket.emit('notification', { type: 'error', message: 'Недостатньо прав' });
+        return;
+      }
       
       await db.run('UPDATE users SET balance = ? WHERE id = ?', [balance, userId]);
-      socket.emit('adminSuccess', 'Баланс оновлено');
+      socket.emit('notification', { type: 'success', message: 'Баланс оновлено' });
+      socket.emit('adminUsersUpdated');
     } catch (error) {
       console.error('Помилка зміни балансу:', error);
     }
@@ -308,10 +351,14 @@ io.on('connection', (socket) => {
   socket.on('adminSetRole', async ({ adminId, userId, role }) => {
     try {
       const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
-      if (!admin || admin.role !== 'owner') return;
+      if (!admin || admin.role !== 'owner') {
+        socket.emit('notification', { type: 'error', message: 'Тільки власник' });
+        return;
+      }
       
       await db.run('UPDATE users SET role = ? WHERE id = ?', [role, userId]);
-      socket.emit('adminSuccess', 'Роль оновлено');
+      socket.emit('notification', { type: 'success', message: 'Роль оновлено' });
+      socket.emit('adminUsersUpdated');
     } catch (error) {
       console.error('Помилка зміни ролі:', error);
     }
@@ -320,11 +367,15 @@ io.on('connection', (socket) => {
   socket.on('adminBan', async ({ adminId, userId, hours }) => {
     try {
       const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
-      if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner')) return;
+      if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner')) {
+        socket.emit('notification', { type: 'error', message: 'Недостатньо прав' });
+        return;
+      }
       
       const bannedUntil = Math.floor(Date.now() / 1000) + (hours * 3600);
       await db.run('UPDATE users SET banned_until = ? WHERE id = ?', [bannedUntil, userId]);
-      socket.emit('adminSuccess', `Користувача забанено на ${hours} годин`);
+      socket.emit('notification', { type: 'success', message: `Користувача забанено на ${hours} годин` });
+      socket.emit('adminUsersUpdated');
     } catch (error) {
       console.error('Помилка бану:', error);
     }
@@ -333,11 +384,15 @@ io.on('connection', (socket) => {
   socket.on('adminMute', async ({ adminId, userId, hours }) => {
     try {
       const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
-      if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner' && admin.role !== 'helper')) return;
+      if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner' && admin.role !== 'helper')) {
+        socket.emit('notification', { type: 'error', message: 'Недостатньо прав' });
+        return;
+      }
       
       const mutedUntil = Math.floor(Date.now() / 1000) + (hours * 3600);
       await db.run('UPDATE users SET muted_until = ? WHERE id = ?', [mutedUntil, userId]);
-      socket.emit('adminSuccess', `Користувача замучено на ${hours} годин`);
+      socket.emit('notification', { type: 'success', message: `Користувача замучено на ${hours} годин` });
+      socket.emit('adminUsersUpdated');
     } catch (error) {
       console.error('Помилка муту:', error);
     }
@@ -346,10 +401,14 @@ io.on('connection', (socket) => {
   socket.on('adminUnban', async ({ adminId, userId }) => {
     try {
       const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
-      if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner')) return;
+      if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner')) {
+        socket.emit('notification', { type: 'error', message: 'Недостатньо прав' });
+        return;
+      }
       
       await db.run('UPDATE users SET banned_until = 0 WHERE id = ?', [userId]);
-      socket.emit('adminSuccess', 'Користувача розбанено');
+      socket.emit('notification', { type: 'success', message: 'Користувача розбанено' });
+      socket.emit('adminUsersUpdated');
     } catch (error) {
       console.error('Помилка розбану:', error);
     }
@@ -358,11 +417,14 @@ io.on('connection', (socket) => {
   socket.on('adminForceCrash', async ({ adminId }) => {
     try {
       const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
-      if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner')) return;
+      if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner')) {
+        socket.emit('notification', { type: 'error', message: 'Недостатньо прав' });
+        return;
+      }
       
       gameState.status = 'crashed';
       io.emit('gameState', gameState);
-      socket.emit('adminSuccess', 'Примусовий вибух');
+      socket.emit('notification', { type: 'success', message: 'Примусовий вибух' });
     } catch (error) {
       console.error('Помилка примусового вибуху:', error);
     }
@@ -405,7 +467,32 @@ const htmlContent = `<!DOCTYPE html>
             max-width: 500px;
             margin: 0 auto;
             padding: 16px;
+            position: relative;
         }
+        
+        /* Нотифікації */
+        .notification {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #1a1f33;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 500;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            display: none;
+            border-left: 4px solid;
+            max-width: 90%;
+            text-align: center;
+        }
+        
+        .notification.success { border-left-color: #4caf50; }
+        .notification.error { border-left-color: #f44336; }
+        .notification.info { border-left-color: #2196f3; }
         
         /* Шапка */
         .header {
@@ -845,18 +932,85 @@ const htmlContent = `<!DOCTYPE html>
             font-weight: bold;
         }
         
-        .game-tab, .admin-tab-content {
+        /* Лідерборд */
+        .leaderboard-panel {
+            background: #151a2c;
+            border-radius: 24px;
+            padding: 20px;
+        }
+        
+        .leaderboard-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 0;
+            border-bottom: 1px solid #2a2f45;
+        }
+        
+        .leaderboard-rank {
+            width: 30px;
+            height: 30px;
+            background: #0a0c17;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        
+        .rank-1 { color: gold; }
+        .rank-2 { color: silver; }
+        .rank-3 { color: #cd7f32; }
+        
+        .leaderboard-info {
+            flex: 1;
+        }
+        
+        .leaderboard-name {
+            font-weight: 600;
+        }
+        
+        .leaderboard-profit {
+            color: #4caf50;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        
+        .tab-content {
             display: none;
         }
         
-        .game-tab.active, .admin-tab-content.active {
+        .tab-content.active {
             display: block;
+        }
+        
+        /* Нотифікація */
+        #notification {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #1a1f33;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 500;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            display: none;
+            border-left: 4px solid;
+            max-width: 90%;
+            text-align: center;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <!-- Шапка з користувачем -->
+        <!-- Нотифікація -->
+        <div id="notification"></div>
+        
+        <!-- Шапка -->
         <div class="header">
             <div class="user-info">
                 <div class="user-avatar" id="userAvatar"></div>
@@ -871,11 +1025,12 @@ const htmlContent = `<!DOCTYPE html>
         <!-- Навігація -->
         <div class="nav">
             <div class="nav-item active" onclick="switchTab('game')">🎮 Гра</div>
-            <div class="nav-item" onclick="switchTab('admin')" id="adminNavItem" style="display: none;">⚙️ Адмін</div>
+            <div class="nav-item" onclick="switchTab('leaderboard')">🏆 Топ</div>
+            <div class="nav-item" id="adminNavItem" style="display: none;" onclick="switchTab('admin')">⚙️ Адмін</div>
         </div>
         
         <!-- Вкладка ГРИ -->
-        <div id="gameTab" class="game-tab active">
+        <div id="gameTab" class="tab-content active">
             <!-- Історія крашу -->
             <div class="history" id="historyContainer"></div>
             
@@ -923,8 +1078,16 @@ const htmlContent = `<!DOCTYPE html>
             </div>
         </div>
         
+        <!-- Вкладка ЛІДЕРБОРД -->
+        <div id="leaderboardTab" class="tab-content">
+            <div class="leaderboard-panel">
+                <h3 style="margin-bottom: 16px; color: gold;">🏆 Топ гравців</h3>
+                <div id="leaderboardList"></div>
+            </div>
+        </div>
+        
         <!-- Вкладка АДМІНКИ -->
-        <div id="adminTab" class="admin-tab-content">
+        <div id="adminTab" class="tab-content">
             <div class="admin-panel">
                 <div class="admin-header">
                     <div class="admin-title">🔧 Адмін панель</div>
@@ -939,12 +1102,12 @@ const htmlContent = `<!DOCTYPE html>
                 </div>
                 
                 <!-- Користувачі -->
-                <div id="adminUsersTab" class="admin-tab-content active">
+                <div id="adminUsersTab" class="admin-tab-content" style="display: block;">
                     <div id="adminUsersList"></div>
                 </div>
                 
                 <!-- Керування грою -->
-                <div id="adminGameTab" class="admin-tab-content">
+                <div id="adminGameTab" class="admin-tab-content" style="display: none;">
                     <div class="admin-user-card">
                         <h3 style="margin-bottom: 12px;">🎰 Параметри крашу</h3>
                         
@@ -990,12 +1153,31 @@ const htmlContent = `<!DOCTYPE html>
         let userRole = 'user';
         let autoCashout = 2.0;
         
+        // Функція показу сповіщень
+        function showNotification(message, type = 'info') {
+            const notif = document.getElementById('notification');
+            notif.textContent = message;
+            notif.className = 'notification ' + type;
+            notif.style.display = 'block';
+            setTimeout(() => {
+                notif.style.display = 'none';
+            }, 3000);
+        }
+        
         // Відображаємо інформацію про користувача
         function updateUserInfo(userData) {
             document.getElementById('userName').textContent = userData.first_name || 'Гравець';
             document.getElementById('userUsername').textContent = userData.username ? '@' + userData.username : '';
             document.getElementById('userAvatar').textContent = (userData.first_name || '?').charAt(0).toUpperCase();
             document.getElementById('balance').textContent = userData.balance + ' монет';
+            currentBalance = userData.balance;
+            userRole = userData.role;
+            
+            // Показуємо кнопку адмінки якщо є права
+            if (userRole !== 'user') {
+                document.getElementById('adminNavItem').style.display = 'block';
+                document.getElementById('adminLevel').textContent = userRole.toUpperCase();
+            }
         }
         
         // Історія крашу
@@ -1017,11 +1199,13 @@ const htmlContent = `<!DOCTYPE html>
             document.querySelectorAll('.nav-item').forEach(t => t.classList.remove('active'));
             event.target.classList.add('active');
             
-            document.getElementById('gameTab').classList.remove('active');
-            document.getElementById('adminTab').classList.remove('active');
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
             
             if (tab === 'game') {
                 document.getElementById('gameTab').classList.add('active');
+            } else if (tab === 'leaderboard') {
+                document.getElementById('leaderboardTab').classList.add('active');
+                loadLeaderboard();
             } else if (tab === 'admin') {
                 document.getElementById('adminTab').classList.add('active');
                 loadAdminUsers();
@@ -1030,12 +1214,15 @@ const htmlContent = `<!DOCTYPE html>
         
         function showAdminTab(tab) {
             document.querySelectorAll('.admin-tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.admin-tab-content').forEach(c => c.classList.remove('active'));
+            document.querySelectorAll('.admin-tab-content').forEach(c => c.style.display = 'none');
             
             event.target.classList.add('active');
-            document.getElementById('admin' + tab.charAt(0).toUpperCase() + tab.slice(1) + 'Tab').classList.add('active');
-            
-            if (tab === 'users') loadAdminUsers();
+            if (tab === 'users') {
+                document.getElementById('adminUsersTab').style.display = 'block';
+                loadAdminUsers();
+            } else {
+                document.getElementById('adminGameTab').style.display = 'block';
+            }
         }
         
         // Швидкі ставки
@@ -1130,6 +1317,10 @@ const htmlContent = `<!DOCTYPE html>
         // Ставка
         document.getElementById('placeBetBtn').addEventListener('click', () => {
             const amount = parseInt(document.getElementById('betAmount').value);
+            if (amount > currentBalance) {
+                showNotification('Недостатньо коштів', 'error');
+                return;
+            }
             socket.emit('placeBet', { userId: user.id, amount });
             activeBet = { amount };
         });
@@ -1140,10 +1331,14 @@ const htmlContent = `<!DOCTYPE html>
         });
         
         socket.on('cashOutSuccess', (data) => {
-            alert(\`🎉 Ви виграли \${data.winAmount} монет!\`);
+            showNotification(\`Ви виграли \${data.winAmount} монет!\`, 'success');
             activeBet = null;
             document.getElementById('cashoutBtn').style.display = 'none';
             loadUser();
+        });
+        
+        socket.on('notification', (data) => {
+            showNotification(data.message, data.type);
         });
         
         // Завантаження користувача
@@ -1159,18 +1354,33 @@ const htmlContent = `<!DOCTYPE html>
                     })
                 });
                 const userData = await res.json();
-                currentBalance = userData.balance;
-                userRole = userData.role;
-                
                 updateUserInfo(userData);
-                
-                // Показуємо кнопку адмінки якщо є права
-                if (userRole !== 'user') {
-                    document.getElementById('adminNavItem').style.display = 'block';
-                    document.getElementById('adminLevel').textContent = userRole.toUpperCase();
-                }
             } catch (error) {
                 console.error('Помилка:', error);
+            }
+        }
+        
+        // Лідерборд
+        async function loadLeaderboard() {
+            try {
+                const res = await fetch('/api/leaderboard');
+                const data = await res.json();
+                const list = document.getElementById('leaderboardList');
+                list.innerHTML = data.map((item, index) => {
+                    const name = item.first_name || item.username || 'Гравець';
+                    const profit = item.profit || 0;
+                    return \`
+                        <div class="leaderboard-item">
+                            <div class="leaderboard-rank rank-\${index+1}">\${index+1}</div>
+                            <div class="leaderboard-info">
+                                <div class="leaderboard-name">\${name}</div>
+                                <div class="leaderboard-profit">+\${profit} монет</div>
+                            </div>
+                        </div>
+                    \`;
+                }).join('');
+            } catch (error) {
+                console.error('Помилка лідерборду:', error);
             }
         }
         
@@ -1191,13 +1401,13 @@ const htmlContent = `<!DOCTYPE html>
                     </div>
                     
                     <div class="admin-controls">
-                        <button class="admin-control green" onclick="setBalance(\${u.id}, prompt('Новий баланс:', \${u.balance}))">
+                        <button class="admin-control green" onclick="setBalance(\${u.id})">
                             💰 \${u.balance}
                         </button>
-                        <button class="admin-control red" onclick="banUser(\${u.id}, prompt('Годин бану:', 24))">
+                        <button class="admin-control red" onclick="banUser(\${u.id})">
                             🔨 Бан
                         </button>
-                        <button class="admin-control blue" onclick="muteUser(\${u.id}, prompt('Годин муту:', 1))">
+                        <button class="admin-control blue" onclick="muteUser(\${u.id})">
                             🔇 Мут
                         </button>
                         \${userRole === 'owner' ? \`
@@ -1208,26 +1418,46 @@ const htmlContent = `<!DOCTYPE html>
                                 <option value="owner" \${u.role === 'owner' ? 'selected' : ''}>👑 Власник (рівень 3)</option>
                             </select>
                         \` : ''}
+                        <button class="admin-control purple" onclick="unbanUser(\${u.id})" style="grid-column: span 2;">✅ Розбан</button>
                     </div>
                 </div>
             \`).join('');
         });
         
+        socket.on('adminUsersUpdated', () => {
+            loadAdminUsers();
+        });
+        
         // Функції адмінки
-        window.setBalance = (userId, balance) => {
-            if (balance) socket.emit('adminSetBalance', { adminId: user.id, userId, balance: parseInt(balance) });
+        window.setBalance = (userId) => {
+            const newBalance = prompt('Введіть новий баланс:');
+            if (newBalance !== null) {
+                socket.emit('adminSetBalance', { adminId: user.id, userId, balance: parseInt(newBalance) });
+            }
         };
         
         window.setRole = (userId, role) => {
             socket.emit('adminSetRole', { adminId: user.id, userId, role });
         };
         
-        window.banUser = (userId, hours) => {
-            if (hours) socket.emit('adminBan', { adminId: user.id, userId, hours: parseInt(hours) });
+        window.banUser = (userId) => {
+            const hours = prompt('Годин бану:', '24');
+            if (hours !== null) {
+                socket.emit('adminBan', { adminId: user.id, userId, hours: parseInt(hours) });
+            }
         };
         
-        window.muteUser = (userId, hours) => {
-            if (hours) socket.emit('adminMute', { adminId: user.id, userId, hours: parseInt(hours) });
+        window.muteUser = (userId) => {
+            const hours = prompt('Годин муту:', '1');
+            if (hours !== null) {
+                socket.emit('adminMute', { adminId: user.id, userId, hours: parseInt(hours) });
+            }
+        };
+        
+        window.unbanUser = (userId) => {
+            if (confirm('Розбанити користувача?')) {
+                socket.emit('adminUnban', { adminId: user.id, userId });
+            }
         };
         
         window.forceCrash = () => {
