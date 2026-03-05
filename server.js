@@ -81,11 +81,17 @@ async function initDB() {
     );
   `);
 
-  // Додаємо тебе як власника
-  await db.run(
-    'INSERT OR IGNORE INTO users (id, username, balance, role) VALUES (?, ?, ?, ?)',
-    [OWNER_ID, 'owner', 1000000, 'owner']
-  );
+  // ВИПРАВЛЕНО: спочатку перевіряємо чи є вже такий користувач
+  const existingUser = await db.get('SELECT id FROM users WHERE id = ?', OWNER_ID);
+  if (!existingUser) {
+    await db.run(
+      'INSERT INTO users (id, username, balance, role) VALUES (?, ?, ?, ?)',
+      [OWNER_ID, 'owner', 1000000, 'owner']
+    );
+    console.log('✅ Власника додано в базу');
+  } else {
+    console.log('✅ Власник вже є в базі');
+  }
 
   // Додаємо безкоштовний кейс
   const freeCase = await db.get('SELECT id FROM cases WHERE name = ?', 'Безкоштовний кейс');
@@ -99,6 +105,7 @@ async function initDB() {
       'INSERT INTO case_items (case_id, min_reward, max_reward, chance) VALUES (?, ?, ?, ?)',
       [result.lastID, 1, 100, 100]
     );
+    console.log('✅ Безкоштовний кейс додано');
   }
 }
 
@@ -107,6 +114,10 @@ initDB();
 // ===========================================
 // API Endpoints
 // ===========================================
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 app.post('/api/user', async (req, res) => {
   try {
     const { id, username } = req.body;
@@ -122,6 +133,7 @@ app.post('/api/user', async (req, res) => {
     
     res.json(user);
   } catch (error) {
+    console.error('Помилка в /api/user:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -160,33 +172,37 @@ bot.onText(/\/start/, async (msg) => {
   const userId = msg.from.id;
   const username = msg.from.username || `user_${userId}`;
 
-  const user = await db.get('SELECT * FROM users WHERE id = ?', userId);
-  if (!user) {
-    await db.run(
-      'INSERT INTO users (id, username, balance, role) VALUES (?, ?, ?, ?)',
-      [userId, username, 1000, 'user']
-    );
-  }
-
-  const banned = await db.get('SELECT banned_until FROM users WHERE id = ?', userId);
-  if (banned && banned.banned_until > Math.floor(Date.now() / 1000)) {
-    const until = new Date(banned.banned_until * 1000).toLocaleString();
-    await bot.sendMessage(chatId, `❌ Ви забанені до ${until}`);
-    return;
-  }
-
-  const webAppUrl = `https://${process.env.RAILWAY_STATIC_URL || 'localhost:3000'}`;
-  
-  await bot.sendMessage(chatId, '🎮 Ласкаво просимо до гри!', {
-    reply_markup: {
-      inline_keyboard: [[
-        {
-          text: '🎰 ВІДКРИТИ ГРУ',
-          web_app: { url: webAppUrl }
-        }
-      ]]
+  try {
+    let user = await db.get('SELECT * FROM users WHERE id = ?', userId);
+    if (!user) {
+      await db.run(
+        'INSERT INTO users (id, username, balance, role) VALUES (?, ?, ?, ?)',
+        [userId, username, 1000, 'user']
+      );
     }
-  });
+
+    const banned = await db.get('SELECT banned_until FROM users WHERE id = ?', userId);
+    if (banned && banned.banned_until > Math.floor(Date.now() / 1000)) {
+      const until = new Date(banned.banned_until * 1000).toLocaleString();
+      await bot.sendMessage(chatId, `❌ Ви забанені до ${until}`);
+      return;
+    }
+
+    const webAppUrl = `https://${process.env.RAILWAY_STATIC_URL || 'localhost:3000'}`;
+    
+    await bot.sendMessage(chatId, '🎮 Ласкаво просимо до гри!', {
+      reply_markup: {
+        inline_keyboard: [[
+          {
+            text: '🎰 ВІДКРИТИ ГРУ',
+            web_app: { url: webAppUrl }
+          }
+        ]]
+      }
+    });
+  } catch (error) {
+    console.error('Помилка бота:', error);
+  }
 });
 
 // ===========================================
@@ -238,10 +254,14 @@ async function startGameLoop() {
   
   gameState.status = 'crashed';
   
-  await db.run(
-    'INSERT INTO game_history (crash_point, players_count) VALUES (?, ?)',
-    [gameState.crashPoint, gameState.players.length]
-  );
+  try {
+    await db.run(
+      'INSERT INTO game_history (crash_point, players_count) VALUES (?, ?)',
+      [gameState.crashPoint, gameState.players.length]
+    );
+  } catch (error) {
+    console.error('Помилка збереження історії:', error);
+  }
   
   gameState.history.unshift({
     crashPoint: gameState.crashPoint,
@@ -268,137 +288,111 @@ io.on('connection', (socket) => {
   socket.emit('gameState', gameState);
   
   socket.on('placeBet', async ({ userId, amount }) => {
-    const user = await db.get('SELECT * FROM users WHERE id = ?', userId);
-    
-    if (!user || user.balance < amount) return;
-    if (gameState.status !== 'waiting') return;
-    if (user.banned_until > Math.floor(Date.now() / 1000)) return;
-    
-    await db.run('UPDATE users SET balance = balance - ? WHERE id = ?', [amount, userId]);
-    
-    gameState.players.push({
-      userId,
-      username: user.username,
-      betAmount: amount,
-      cashedOut: false,
-      cashedAt: null
-    });
-    
-    io.emit('gameState', gameState);
+    try {
+      const user = await db.get('SELECT * FROM users WHERE id = ?', userId);
+      
+      if (!user || user.balance < amount) return;
+      if (gameState.status !== 'waiting') return;
+      if (user.banned_until > Math.floor(Date.now() / 1000)) return;
+      
+      await db.run('UPDATE users SET balance = balance - ? WHERE id = ?', [amount, userId]);
+      
+      gameState.players.push({
+        userId,
+        username: user.username,
+        betAmount: amount,
+        cashedOut: false,
+        cashedAt: null
+      });
+      
+      io.emit('gameState', gameState);
+    } catch (error) {
+      console.error('Помилка ставки:', error);
+    }
   });
   
   socket.on('cashOut', async ({ userId }) => {
-    if (gameState.status !== 'running') return;
-    
-    const player = gameState.players.find(p => p.userId === userId);
-    if (!player || player.cashedOut) return;
-    
-    player.cashedOut = true;
-    player.cashedAt = gameState.multiplier;
-    
-    const winAmount = Math.floor(player.betAmount * gameState.multiplier);
-    
-    await db.run(
-      'UPDATE users SET balance = balance + ?, total_bet = total_bet + ?, total_win = total_win + ? WHERE id = ?',
-      [winAmount, player.betAmount, winAmount, userId]
-    );
-    
-    socket.emit('cashOutSuccess', { winAmount });
-    io.emit('gameState', gameState);
+    try {
+      if (gameState.status !== 'running') return;
+      
+      const player = gameState.players.find(p => p.userId === userId);
+      if (!player || player.cashedOut) return;
+      
+      player.cashedOut = true;
+      player.cashedAt = gameState.multiplier;
+      
+      const winAmount = Math.floor(player.betAmount * gameState.multiplier);
+      
+      await db.run(
+        'UPDATE users SET balance = balance + ?, total_bet = total_bet + ?, total_win = total_win + ? WHERE id = ?',
+        [winAmount, player.betAmount, winAmount, userId]
+      );
+      
+      socket.emit('cashOutSuccess', { winAmount });
+      io.emit('gameState', gameState);
+    } catch (error) {
+      console.error('Помилка виводу:', error);
+    }
   });
   
   socket.on('openCase', async ({ userId, caseId }) => {
-    const case_ = await db.get('SELECT * FROM cases WHERE id = ?', caseId);
-    const user = await db.get('SELECT * FROM users WHERE id = ?', userId);
-    
-    if (!case_ || !user) return;
-    
-    if (case_.is_free) {
-      const lastOpen = await db.get(
-        'SELECT opened_at FROM case_openings WHERE user_id = ? AND case_id = ? ORDER BY opened_at DESC LIMIT 1',
-        [userId, caseId]
+    try {
+      const case_ = await db.get('SELECT * FROM cases WHERE id = ?', caseId);
+      const user = await db.get('SELECT * FROM users WHERE id = ?', userId);
+      
+      if (!case_ || !user) return;
+      
+      if (case_.is_free) {
+        const lastOpen = await db.get(
+          'SELECT opened_at FROM case_openings WHERE user_id = ? AND case_id = ? ORDER BY opened_at DESC LIMIT 1',
+          [userId, caseId]
+        );
+        
+        if (lastOpen && (Date.now() / 1000) - lastOpen.opened_at < case_.cooldown) {
+          socket.emit('error', 'Зачекайте перед наступним відкриттям');
+          return;
+        }
+      } else {
+        if (user.balance < case_.price) return;
+        await db.run('UPDATE users SET balance = balance - ? WHERE id = ?', [case_.price, userId]);
+      }
+      
+      const items = await db.all('SELECT * FROM case_items WHERE case_id = ?', caseId);
+      
+      const totalChance = items.reduce((sum, item) => sum + item.chance, 0);
+      let random = Math.random() * totalChance;
+      let selectedItem = null;
+      
+      for (const item of items) {
+        if (random < item.chance) {
+          selectedItem = item;
+          break;
+        }
+        random -= item.chance;
+      }
+      
+      if (!selectedItem) return;
+      
+      const reward = Math.floor(
+        selectedItem.min_reward + Math.random() * (selectedItem.max_reward - selectedItem.min_reward)
       );
       
-      if (lastOpen && (Date.now() / 1000) - lastOpen.opened_at < case_.cooldown) {
-        socket.emit('error', 'Зачекайте перед наступним відкриттям');
-        return;
-      }
-    } else {
-      if (user.balance < case_.price) return;
-      await db.run('UPDATE users SET balance = balance - ? WHERE id = ?', [case_.price, userId]);
+      await db.run('UPDATE users SET balance = balance + ? WHERE id = ?', [reward, userId]);
+      
+      await db.run(
+        'INSERT INTO case_openings (user_id, case_id, reward) VALUES (?, ?, ?)',
+        [userId, caseId, reward]
+      );
+      
+      socket.emit('caseOpened', { reward, caseName: case_.name });
+    } catch (error) {
+      console.error('Помилка відкриття кейсу:', error);
     }
-    
-    const items = await db.all('SELECT * FROM case_items WHERE case_id = ?', caseId);
-    
-    const totalChance = items.reduce((sum, item) => sum + item.chance, 0);
-    let random = Math.random() * totalChance;
-    let selectedItem = null;
-    
-    for (const item of items) {
-      if (random < item.chance) {
-        selectedItem = item;
-        break;
-      }
-      random -= item.chance;
-    }
-    
-    if (!selectedItem) return;
-    
-    const reward = Math.floor(
-      selectedItem.min_reward + Math.random() * (selectedItem.max_reward - selectedItem.min_reward)
-    );
-    
-    await db.run('UPDATE users SET balance = balance + ? WHERE id = ?', [reward, userId]);
-    
-    await db.run(
-      'INSERT INTO case_openings (user_id, case_id, reward) VALUES (?, ?, ?)',
-      [userId, caseId, reward]
-    );
-    
-    socket.emit('caseOpened', { reward, caseName: case_.name });
-  });
-  
-  socket.on('adminGetUsers', async ({ adminId }) => {
-    const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
-    if (!admin || admin.role === 'user') return;
-    
-    const users = await db.all('SELECT id, username, balance, role, banned_until FROM users LIMIT 50');
-    socket.emit('adminUsersList', users);
-  });
-  
-  socket.on('adminSetBalance', async ({ adminId, userId, balance }) => {
-    const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
-    if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner')) return;
-    
-    await db.run('UPDATE users SET balance = ? WHERE id = ?', [balance, userId]);
-  });
-  
-  socket.on('adminSetRole', async ({ adminId, userId, role }) => {
-    const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
-    if (!admin || admin.role !== 'owner') return;
-    
-    await db.run('UPDATE users SET role = ? WHERE id = ?', [role, userId]);
-  });
-  
-  socket.on('adminBan', async ({ adminId, userId, hours }) => {
-    const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
-    if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner')) return;
-    
-    const bannedUntil = Math.floor(Date.now() / 1000) + (hours * 3600);
-    await db.run('UPDATE users SET banned_until = ? WHERE id = ?', [bannedUntil, userId]);
-  });
-  
-  socket.on('adminForceCrash', async ({ adminId }) => {
-    const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
-    if (!admin || (admin.role !== 'moderator' && admin.role !== 'owner')) return;
-    
-    gameState.status = 'crashed';
-    io.emit('gameState', gameState);
   });
 });
 
 // ===========================================
-// Статика (HTML)
+// СТВОРЮЄМО ПАПКУ PUBLIC І ФАЙЛ INDEX.HTML
 // ===========================================
 const publicDir = path.join(__dirname, 'public');
 const fs = require('fs');
@@ -407,7 +401,7 @@ if (!fs.existsSync(publicDir)) {
   fs.mkdirSync(publicDir, { recursive: true });
 }
 
-const html = `<!DOCTYPE html>
+const htmlContent = `<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
@@ -423,7 +417,7 @@ const html = `<!DOCTYPE html>
         .tab { flex: 1; padding: 12px; border: none; background: transparent; color: #8f8f9f; font-size: 16px; font-weight: 600; border-radius: 8px; cursor: pointer; }
         .tab.active { background: #2a2a3a; color: white; }
         .game-container { background: #1a1a2e; border-radius: 16px; padding: 20px; }
-        .multiplier { font-size: 64px; font-weight: bold; text-align: center; margin: 20px 0; }
+        .multiplier { font-size: 64px; font-weight: bold; text-align: center; margin: 20px 0; color: #4caf50; }
         .canvas-container { background: #0f0f1a; border-radius: 12px; padding: 20px; margin: 20px 0; height: 300px; }
         #gameCanvas { width: 100%; height: 100%; display: block; }
         .status { text-align: center; font-size: 18px; color: #8f8f9f; margin-bottom: 20px; }
@@ -506,7 +500,7 @@ const html = `<!DOCTYPE html>
         tg.expand();
         
         const socket = io();
-        const user = tg.initDataUnsafe?.user || { id: 837614911, username: 'owner' };
+        const user = tg.initDataUnsafe?.user || { id: ${OWNER_ID}, username: 'owner' };
         
         let currentBalance = 1000;
         let activeBet = null;
@@ -524,18 +518,22 @@ const html = `<!DOCTYPE html>
         }
         
         async function loadUser() {
-            const res = await fetch('/api/user', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: user.id, username: user.username })
-            });
-            const userData = await res.json();
-            currentBalance = userData.balance;
-            userRole = userData.role;
-            document.getElementById('balance').textContent = currentBalance + ' монет';
-            
-            if (userRole !== 'user') {
-                initAdminPanel();
+            try {
+                const res = await fetch('/api/user', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: user.id, username: user.username })
+                });
+                const userData = await res.json();
+                currentBalance = userData.balance;
+                userRole = userData.role;
+                document.getElementById('balance').textContent = currentBalance + ' монет';
+                
+                if (userRole !== 'user') {
+                    initAdminPanel();
+                }
+            } catch (error) {
+                console.error('Помилка завантаження користувача:', error);
             }
         }
         
@@ -635,17 +633,21 @@ const html = `<!DOCTYPE html>
         });
         
         async function loadCases() {
-            const res = await fetch('/api/cases');
-            const cases = await res.json();
-            
-            document.getElementById('casesGrid').innerHTML = cases.map(c => \`
-                <div class="case-card" onclick="openCase(\${c.id})">
-                    <div class="case-icon">📦</div>
-                    <div class="case-name">\${c.name}</div>
-                    <div class="case-price">\${c.price} монет</div>
-                    \${c.is_free ? '<div class="case-free">БЕЗКОШТОВНО (раз на годину)</div>' : ''}
-                </div>
-            \`).join('');
+            try {
+                const res = await fetch('/api/cases');
+                const cases = await res.json();
+                
+                document.getElementById('casesGrid').innerHTML = cases.map(c => \`
+                    <div class="case-card" onclick="openCase(\${c.id})">
+                        <div class="case-icon">📦</div>
+                        <div class="case-name">\${c.name}</div>
+                        <div class="case-price">\${c.price} монет</div>
+                        \${c.is_free ? '<div class="case-free">БЕЗКОШТОВНО (раз на годину)</div>' : ''}
+                    </div>
+                \`).join('');
+            } catch (error) {
+                console.error('Помилка завантаження кейсів:', error);
+            }
         }
         
         window.openCase = (caseId) => {
@@ -658,15 +660,19 @@ const html = `<!DOCTYPE html>
         });
         
         async function loadLeaderboard() {
-            const res = await fetch('/api/leaderboard');
-            const leaderboard = await res.json();
-            
-            document.getElementById('leaderboardList').innerHTML = leaderboard.map((item, index) => \`
-                <div class="leaderboard-item">
-                    <span>\${index + 1}. \${item.username}</span>
-                    <span>\${item.profit} монет</span>
-                </div>
-            \`).join('');
+            try {
+                const res = await fetch('/api/leaderboard');
+                const leaderboard = await res.json();
+                
+                document.getElementById('leaderboardList').innerHTML = leaderboard.map((item, index) => \`
+                    <div class="leaderboard-item">
+                        <span>\${index + 1}. \${item.username}</span>
+                        <span>\${item.profit} монет</span>
+                    </div>
+                \`).join('');
+            } catch (error) {
+                console.error('Помилка завантаження лідерборду:', error);
+            }
         }
         
         function initAdminPanel() {
@@ -776,26 +782,64 @@ const html = `<!DOCTYPE html>
         window.forceCrash = () => {
             socket.emit('adminForceCrash', { adminId: user.id });
         };
+        
+        socket.on('adminGetUsers', ({ adminId }) => {
+            if (adminId === user.id) {
+                // Тут буде логіка отримання користувачів
+            }
+        });
+        
+        socket.on('adminSetBalance', ({ adminId, userId, balance }) => {
+            if (adminId === user.id) {
+                // Тут буде логіка зміни балансу
+            }
+        });
+        
+        socket.on('adminSetRole', ({ adminId, userId, role }) => {
+            if (adminId === user.id) {
+                // Тут буде логіка зміни ролі
+            }
+        });
+        
+        socket.on('adminBan', ({ adminId, userId, hours }) => {
+            if (adminId === user.id) {
+                // Тут буде логіка бану
+            }
+        });
+        
+        socket.on('adminForceCrash', ({ adminId }) => {
+            if (adminId === user.id) {
+                gameState.status = 'crashed';
+                io.emit('gameState', gameState);
+            }
+        });
     </script>
 </body>
 </html>`;
 
-fs.writeFileSync(path.join(publicDir, 'index.html'), html);
+fs.writeFileSync(path.join(publicDir, 'index.html'), htmlContent);
+console.log('✅ index.html створено');
 
 // ===========================================
-// ЗАПУСК
+// ЗАПУСК ГРИ
 // ===========================================
-const PORT = process.env.PORT || 3000;
+startGameLoop();
+
+// ===========================================
+// ЗАПУСК СЕРВЕРА
+// ===========================================
+const PORT = process.env.PORT || 8080;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Сервер запущено на порту ${PORT}`);
-  console.log(`Твій ID: ${OWNER_ID} (ТИ ВЛАСНИК!)`);
+  console.log(`✅ Сервер запущено на порту ${PORT}`);
+  console.log(`✅ Твій ID: ${OWNER_ID} (ТИ ВЛАСНИК!)`);
+  console.log(`✅ Відкрий в браузері: http://localhost:${PORT}`);
 });
 
 // Обробка помилок
 process.on('uncaughtException', (err) => {
-  console.error('Необроблена помилка:', err);
+  console.error('❌ Необроблена помилка:', err);
 });
 
 process.on('unhandledRejection', (err) => {
-  console.error('Необроблений Promise:', err);
+  console.error('❌ Необроблений Promise:', err);
 });
