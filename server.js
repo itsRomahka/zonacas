@@ -39,6 +39,7 @@ async function initDB() {
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY,
       username TEXT,
+      first_name TEXT,
       balance INTEGER DEFAULT 1000,
       role TEXT DEFAULT 'user',
       total_bet INTEGER DEFAULT 0,
@@ -77,8 +78,8 @@ async function initDB() {
   const existingUser = await db.get('SELECT id FROM users WHERE id = ?', OWNER_ID);
   if (!existingUser) {
     await db.run(
-      'INSERT INTO users (id, username, balance, role) VALUES (?, ?, ?, ?)',
-      [OWNER_ID, 'Vladyslav', 1000000, 'owner']
+      'INSERT INTO users (id, username, first_name, balance, role) VALUES (?, ?, ?, ?, ?)',
+      [OWNER_ID, 'vladyslav_owner', 'Владислав', 1000000, 'owner']
     );
     console.log('✅ Власника додано в базу');
   }
@@ -109,13 +110,13 @@ app.get('/', (req, res) => {
 
 app.post('/api/user', async (req, res) => {
   try {
-    const { id, username } = req.body;
+    const { id, username, first_name } = req.body;
     let user = await db.get('SELECT * FROM users WHERE id = ?', id);
     
     if (!user) {
       await db.run(
-        'INSERT INTO users (id, username, balance, role) VALUES (?, ?, ?, ?)',
-        [id, username, 1000, 'user']
+        'INSERT INTO users (id, username, first_name, balance, role) VALUES (?, ?, ?, ?, ?)',
+        [id, username || 'user', first_name || 'Гравець', 1000, 'user']
       );
       user = await db.get('SELECT * FROM users WHERE id = ?', id);
     }
@@ -134,24 +135,25 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
-  const username = msg.from.username || msg.from.first_name || `user_${userId}`;
+  const username = msg.from.username || '';
+  const firstName = msg.from.first_name || 'Гравець';
 
   try {
     let user = await db.get('SELECT * FROM users WHERE id = ?', userId);
     if (!user) {
       await db.run(
-        'INSERT INTO users (id, username, balance, role) VALUES (?, ?, ?, ?)',
-        [userId, username, 1000, 'user']
+        'INSERT INTO users (id, username, first_name, balance, role) VALUES (?, ?, ?, ?, ?)',
+        [userId, username, firstName, 1000, 'user']
       );
     }
 
     const webAppUrl = `https://${process.env.RAILWAY_STATIC_URL || 'localhost:3000'}`;
     
-    await bot.sendMessage(chatId, '🎮 Ласкаво просимо до Фортуна Crash!', {
+    await bot.sendMessage(chatId, '🎮 Ласкаво просимо до Crash Game!', {
       reply_markup: {
         inline_keyboard: [[
           {
-            text: '🎰 ГРАТИ В CRASH',
+            text: '🎰 ГРАТИ',
             web_app: { url: webAppUrl }
           }
         ]]
@@ -171,7 +173,7 @@ let gameState = {
   crashPoint: 1.00,
   timeUntilStart: 8,
   players: [],
-  history: [1.20, 1.64, 2.99, 20.19, 1.65, 1.00, 1.17, 1.00, 1.15] // Історія як на скріншоті
+  history: [1.20, 1.64, 2.99, 20.19, 1.65, 1.00, 1.17, 1.00, 1.15]
 };
 
 function generateCrashPoint() {
@@ -211,7 +213,6 @@ async function startGameLoop() {
   
   gameState.status = 'crashed';
   
-  // Додаємо в історію
   gameState.history.unshift(gameState.crashPoint);
   if (gameState.history.length > 9) {
     gameState.history.pop();
@@ -243,7 +244,7 @@ io.on('connection', (socket) => {
       
       gameState.players.push({
         userId,
-        username: user.username,
+        username: user.first_name || user.username || 'Гравець',
         betAmount: amount,
         cashedOut: false,
         cashedAt: null
@@ -285,7 +286,7 @@ io.on('connection', (socket) => {
       const admin = await db.get('SELECT role FROM users WHERE id = ?', adminId);
       if (!admin || admin.role === 'user') return;
       
-      const users = await db.all('SELECT id, username, balance, role, banned_until, muted_until FROM users ORDER BY role DESC, balance DESC LIMIT 100');
+      const users = await db.all('SELECT id, username, first_name, balance, role, banned_until, muted_until FROM users ORDER BY role DESC, balance DESC LIMIT 100');
       socket.emit('adminUsersList', users);
     } catch (error) {
       console.error('Помилка отримання користувачів:', error);
@@ -383,7 +384,7 @@ const htmlContent = `<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Фортуна Crash</title>
+    <title>Crash Game</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="/socket.io/socket.io.js"></script>
     <style>
@@ -404,7 +405,6 @@ const htmlContent = `<!DOCTYPE html>
             max-width: 500px;
             margin: 0 auto;
             padding: 16px;
-            position: relative;
         }
         
         /* Шапка */
@@ -413,24 +413,33 @@ const htmlContent = `<!DOCTYPE html>
             justify-content: space-between;
             align-items: center;
             margin-bottom: 16px;
+            background: #151a2c;
+            padding: 12px;
+            border-radius: 20px;
         }
         
         .user-info {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 12px;
         }
         
         .user-avatar {
-            width: 40px;
-            height: 40px;
+            width: 48px;
+            height: 48px;
             border-radius: 50%;
             background: linear-gradient(135deg, #667eea, #764ba2);
             display: flex;
             align-items: center;
             justify-content: center;
             font-weight: bold;
-            font-size: 18px;
+            font-size: 20px;
+            color: white;
+        }
+        
+        .user-details {
+            display: flex;
+            flex-direction: column;
         }
         
         .user-name {
@@ -438,38 +447,18 @@ const htmlContent = `<!DOCTYPE html>
             font-size: 16px;
         }
         
-        .user-class {
-            font-size: 12px;
+        .user-username {
+            font-size: 13px;
             color: #888;
         }
         
-        .stats {
-            background: #151a2c;
-            border-radius: 20px;
+        .balance {
+            background: #2a2f45;
             padding: 8px 16px;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-        
-        .stat-item {
-            text-align: center;
-        }
-        
-        .stat-label {
-            font-size: 11px;
-            color: #888;
-        }
-        
-        .stat-value {
+            border-radius: 30px;
             font-weight: bold;
-            font-size: 16px;
             color: #4caf50;
-        }
-        
-        .stat-change {
-            font-size: 11px;
-            color: #888;
+            font-size: 18px;
         }
         
         /* Навігація */
@@ -516,21 +505,10 @@ const htmlContent = `<!DOCTYPE html>
             white-space: nowrap;
         }
         
-        .history-item.green {
-            color: #4caf50;
-        }
-        
-        .history-item.red {
-            color: #f44336;
-        }
-        
-        .history-item.blue {
-            color: #2196f3;
-        }
-        
-        .history-item.orange {
-            color: #ff9800;
-        }
+        .history-item.green { color: #4caf50; }
+        .history-item.red { color: #f44336; }
+        .history-item.blue { color: #2196f3; }
+        .history-item.orange { color: #ff9800; }
         
         /* Гра */
         .game-area {
@@ -548,14 +526,8 @@ const htmlContent = `<!DOCTYPE html>
             margin-bottom: 8px;
         }
         
-        .multiplier.running {
-            color: #4caf50;
-            text-shadow: 0 0 20px rgba(76, 175, 80, 0.3);
-        }
-        
-        .multiplier.crashed {
-            color: #f44336;
-        }
+        .multiplier.running { color: #4caf50; text-shadow: 0 0 20px rgba(76, 175, 80, 0.3); }
+        .multiplier.crashed { color: #f44336; }
         
         .game-status {
             text-align: center;
@@ -650,7 +622,6 @@ const htmlContent = `<!DOCTYPE html>
             font-weight: bold;
             font-size: 16px;
             cursor: pointer;
-            transition: opacity 0.2s;
         }
         
         .bet-button:disabled {
@@ -669,7 +640,6 @@ const htmlContent = `<!DOCTYPE html>
             width: 100%;
             cursor: pointer;
             margin-bottom: 16px;
-            transition: opacity 0.2s;
         }
         
         .quick-bets {
@@ -688,11 +658,6 @@ const htmlContent = `<!DOCTYPE html>
             font-weight: 600;
             font-size: 14px;
             cursor: pointer;
-            transition: background 0.2s;
-        }
-        
-        .quick-bet:hover {
-            background: #2a2f45;
         }
         
         .auto-cashout {
@@ -733,7 +698,7 @@ const htmlContent = `<!DOCTYPE html>
             line-height: 1.4;
         }
         
-        /* Адмін панель (окрема вкладка) */
+        /* Адмін панель */
         .admin-panel {
             background: #151a2c;
             border-radius: 24px;
@@ -752,11 +717,6 @@ const htmlContent = `<!DOCTYPE html>
             font-size: 20px;
             font-weight: bold;
             color: gold;
-        }
-        
-        .admin-levels {
-            display: flex;
-            gap: 8px;
         }
         
         .admin-level {
@@ -837,17 +797,15 @@ const htmlContent = `<!DOCTYPE html>
             display: grid;
             grid-template-columns: repeat(2, 1fr);
             gap: 8px;
-            margin-bottom: 12px;
         }
         
         .admin-control {
-            background: #151a2c;
+            padding: 10px;
             border: none;
-            border-radius: 12px;
-            padding: 12px;
+            border-radius: 8px;
             color: white;
+            font-weight: 600;
             cursor: pointer;
-            transition: background 0.2s;
             font-size: 13px;
         }
         
@@ -860,7 +818,7 @@ const htmlContent = `<!DOCTYPE html>
             display: flex;
             align-items: center;
             gap: 8px;
-            margin-bottom: 8px;
+            margin-bottom: 12px;
         }
         
         .admin-slider input[type="range"] {
@@ -887,121 +845,40 @@ const htmlContent = `<!DOCTYPE html>
             font-weight: bold;
         }
         
-        .game-tab, .cases-tab, .leaderboard-tab {
+        .game-tab, .admin-tab-content {
             display: none;
         }
         
-        .game-tab.active, .cases-tab.active, .leaderboard-tab.active {
+        .game-tab.active, .admin-tab-content.active {
             display: block;
-        }
-        
-        /* Кейси */
-        .cases-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 12px;
-        }
-        
-        .case-card {
-            background: #151a2c;
-            border-radius: 16px;
-            padding: 16px;
-            text-align: center;
-        }
-        
-        .case-icon {
-            font-size: 40px;
-            margin-bottom: 8px;
-        }
-        
-        .case-name {
-            font-weight: bold;
-            margin-bottom: 4px;
-        }
-        
-        .case-price {
-            color: #4caf50;
-            font-weight: 600;
-            font-size: 14px;
-        }
-        
-        /* Лідерборд */
-        .leaderboard-item {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            background: #151a2c;
-            border-radius: 12px;
-            padding: 12px;
-            margin-bottom: 8px;
-        }
-        
-        .leaderboard-rank {
-            width: 30px;
-            height: 30px;
-            background: #0a0c17;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: bold;
-        }
-        
-        .rank-1 { color: gold; }
-        .rank-2 { color: silver; }
-        .rank-3 { color: #cd7f32; }
-        
-        .leaderboard-info {
-            flex: 1;
-        }
-        
-        .leaderboard-name {
-            font-weight: 600;
-        }
-        
-        .leaderboard-profit {
-            color: #4caf50;
-            font-weight: bold;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <!-- Шапка -->
+        <!-- Шапка з користувачем -->
         <div class="header">
             <div class="user-info">
-                <div class="user-avatar" id="userAvatar">В</div>
-                <div>
-                    <div class="user-name" id="userName">Владислав Шегеда</div>
-                    <div class="user-class" id="userClass">10-Г</div>
+                <div class="user-avatar" id="userAvatar"></div>
+                <div class="user-details">
+                    <div class="user-name" id="userName">Завантаження...</div>
+                    <div class="user-username" id="userUsername">@username</div>
                 </div>
             </div>
-            <div class="stats">
-                <div class="stat-item">
-                    <div class="stat-label">СЕРЕДНІЙ БАЛ</div>
-                    <div class="stat-value" id="avgScore">5.31</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">ЗА ТИЖДЕНЬ</div>
-                    <div class="stat-value" id="weeklyChange">— 0.00</div>
-                </div>
-            </div>
+            <div class="balance" id="balance">1000</div>
         </div>
         
         <!-- Навігація -->
         <div class="nav">
-            <div class="nav-item active" onclick="switchTab('game')">Розклад</div>
-            <div class="nav-item" onclick="switchTab('homework')">ДЗ</div>
-            <div class="nav-item" onclick="switchTab('grades')">Табель</div>
-            <div class="nav-item" onclick="switchTab('vip')">VIP</div>
-            <div class="nav-item" onclick="switchTab('fortune')">Фортуна</div>
+            <div class="nav-item active" onclick="switchTab('game')">🎮 Гра</div>
+            <div class="nav-item" onclick="switchTab('admin')" id="adminNavItem" style="display: none;">⚙️ Адмін</div>
         </div>
         
-        <!-- Історія крашу -->
-        <div class="history" id="historyContainer"></div>
-        
-        <!-- Вкладка Фортуна (гра) -->
-        <div id="fortuneTab" class="fortune-tab active">
+        <!-- Вкладка ГРИ -->
+        <div id="gameTab" class="game-tab active">
+            <!-- Історія крашу -->
+            <div class="history" id="historyContainer"></div>
+            
             <div class="game-area">
                 <div class="multiplier" id="multiplier">1.00x</div>
                 <div class="game-status" id="gameStatus">Зробіть ставку</div>
@@ -1016,7 +893,7 @@ const htmlContent = `<!DOCTYPE html>
                 </div>
                 
                 <div class="players-bets" id="playersBets">
-                    <!-- Тут будуть гравці -->
+                    <!-- Гравці -->
                 </div>
                 
                 <div class="bet-panel">
@@ -1046,32 +923,28 @@ const htmlContent = `<!DOCTYPE html>
             </div>
         </div>
         
-        <!-- Вкладка VIP (адмінка) - буде показана тільки для адмінів -->
-        <div id="vipTab" class="vip-tab" style="display: none;">
+        <!-- Вкладка АДМІНКИ -->
+        <div id="adminTab" class="admin-tab-content">
             <div class="admin-panel">
                 <div class="admin-header">
                     <div class="admin-title">🔧 Адмін панель</div>
-                    <div class="admin-levels">
-                        <span class="admin-level level-owner" id="adminLevel">OWNER</span>
-                    </div>
+                    <div class="admin-level" id="adminLevel">OWNER</div>
                 </div>
                 
                 <input type="text" class="admin-search" id="adminSearch" placeholder="🔍 Пошук користувача...">
                 
                 <div class="admin-tabs">
                     <button class="admin-tab active" onclick="showAdminTab('users')">👥 Користувачі</button>
-                    <button class="admin-tab" onclick="showAdminTab('game')">🎮 Керування грою</button>
-                    <button class="admin-tab" onclick="showAdminTab('cases')">📦 Кейси</button>
-                    <button class="admin-tab" onclick="showAdminTab('logs')">📊 Логи</button>
+                    <button class="admin-tab" onclick="showAdminTab('game')">🎮 Гра</button>
                 </div>
                 
-                <!-- Вкладка Користувачі -->
+                <!-- Користувачі -->
                 <div id="adminUsersTab" class="admin-tab-content active">
                     <div id="adminUsersList"></div>
                 </div>
                 
-                <!-- Вкладка Керування грою -->
-                <div id="adminGameTab" class="admin-tab-content" style="display: none;">
+                <!-- Керування грою -->
+                <div id="adminGameTab" class="admin-tab-content">
                     <div class="admin-user-card">
                         <h3 style="margin-bottom: 12px;">🎰 Параметри крашу</h3>
                         
@@ -1093,36 +966,7 @@ const htmlContent = `<!DOCTYPE html>
                             <span class="admin-slider-value" id="houseEdgeValue">5%</span>
                         </div>
                         
-                        <div style="display: flex; gap: 8px; margin-top: 16px;">
-                            <button class="admin-control red" onclick="forceCrash()" style="flex: 1;">💥 ПРИМУСОВИЙ ВИБУХ</button>
-                            <button class="admin-control blue" onclick="resetGame()" style="flex: 1;">🔄 Скинути гру</button>
-                        </div>
-                    </div>
-                    
-                    <div class="admin-user-card">
-                        <h3 style="margin-bottom: 12px;">📊 Статистика</h3>
-                        <div>Всього ігор: <span id="totalGames">0</span></div>
-                        <div>Гравців онлайн: <span id="playersOnline">0</span></div>
-                        <div>Загальний банк: <span id="totalBank">0</span></div>
-                    </div>
-                </div>
-                
-                <!-- Вкладка Кейси -->
-                <div id="adminCasesTab" class="admin-tab-content" style="display: none;">
-                    <div class="admin-user-card">
-                        <h3 style="margin-bottom: 12px;">📦 Додати кейс</h3>
-                        <input type="text" placeholder="Назва кейсу" style="width: 100%; padding: 8px; margin-bottom: 8px; background: #0a0c17; border: none; border-radius: 8px; color: white;">
-                        <input type="number" placeholder="Ціна" style="width: 100%; padding: 8px; margin-bottom: 8px; background: #0a0c17; border: none; border-radius: 8px; color: white;">
-                        <button class="admin-control green" style="width: 100%;">➕ Додати кейс</button>
-                    </div>
-                </div>
-                
-                <!-- Вкладка Логи -->
-                <div id="adminLogsTab" class="admin-tab-content" style="display: none;">
-                    <div class="admin-user-card">
-                        <div style="padding: 8px; border-bottom: 1px solid #2a2f45;">🎮 Гра #1234 - Вибух на 2.45x - 5 гравців</div>
-                        <div style="padding: 8px; border-bottom: 1px solid #2a2f45;">📦 Vladyslav відкрив кейс +50 монет</div>
-                        <div style="padding: 8px;">💰 Admin видалив баланс User#123 +1000</div>
+                        <button class="admin-control red" onclick="forceCrash()" style="width: 100%; margin-top: 8px;">💥 ПРИМУСОВИЙ ВИБУХ</button>
                     </div>
                 </div>
             </div>
@@ -1137,7 +981,7 @@ const htmlContent = `<!DOCTYPE html>
         const socket = io();
         const user = tg.initDataUnsafe?.user || { 
             id: ${OWNER_ID}, 
-            username: 'Vladyslav',
+            username: 'vladyslav_owner',
             first_name: 'Владислав'
         };
         
@@ -1146,13 +990,19 @@ const htmlContent = `<!DOCTYPE html>
         let userRole = 'user';
         let autoCashout = 2.0;
         
-        // Встановлюємо ім'я користувача
-        document.getElementById('userName').textContent = user.first_name + ' ' + (user.last_name || '');
-        document.getElementById('userAvatar').textContent = user.first_name?.charAt(0) || 'В';
+        // Відображаємо інформацію про користувача
+        function updateUserInfo(userData) {
+            document.getElementById('userName').textContent = userData.first_name || 'Гравець';
+            document.getElementById('userUsername').textContent = userData.username ? '@' + userData.username : '';
+            document.getElementById('userAvatar').textContent = (userData.first_name || '?').charAt(0).toUpperCase();
+            document.getElementById('balance').textContent = userData.balance + ' монет';
+        }
         
         // Історія крашу
         function updateHistory(history) {
             const container = document.getElementById('historyContainer');
+            if (!container) return;
+            
             container.innerHTML = history.map(h => {
                 let color = 'green';
                 if (h >= 10) color = 'orange';
@@ -1167,17 +1017,28 @@ const htmlContent = `<!DOCTYPE html>
             document.querySelectorAll('.nav-item').forEach(t => t.classList.remove('active'));
             event.target.classList.add('active');
             
-            if (tab === 'fortune') {
-                document.getElementById('fortuneTab').style.display = 'block';
-                document.getElementById('vipTab').style.display = 'none';
-            } else if (tab === 'vip' && userRole !== 'user') {
-                document.getElementById('fortuneTab').style.display = 'none';
-                document.getElementById('vipTab').style.display = 'block';
+            document.getElementById('gameTab').classList.remove('active');
+            document.getElementById('adminTab').classList.remove('active');
+            
+            if (tab === 'game') {
+                document.getElementById('gameTab').classList.add('active');
+            } else if (tab === 'admin') {
+                document.getElementById('adminTab').classList.add('active');
                 loadAdminUsers();
             }
         }
         
-        // Встановити швидку ставку
+        function showAdminTab(tab) {
+            document.querySelectorAll('.admin-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.admin-tab-content').forEach(c => c.classList.remove('active'));
+            
+            event.target.classList.add('active');
+            document.getElementById('admin' + tab.charAt(0).toUpperCase() + tab.slice(1) + 'Tab').classList.add('active');
+            
+            if (tab === 'users') loadAdminUsers();
+        }
+        
+        // Швидкі ставки
         function setBet(amount) {
             document.getElementById('betAmount').value = amount;
         }
@@ -1220,7 +1081,7 @@ const htmlContent = `<!DOCTYPE html>
             
             document.getElementById('betsCount').textContent = state.players.length;
             
-            // Оновлюємо список гравців
+            // Список гравців
             const playersHtml = state.players.map(p => \`
                 <div class="player-bet">
                     <span>\${p.username}</span>
@@ -1229,12 +1090,12 @@ const htmlContent = `<!DOCTYPE html>
             \`).join('');
             document.getElementById('playersBets').innerHTML = playersHtml || '<div class="player-bet">Немає ставок</div>';
             
-            // Оновлюємо історію
+            // Історія
             if (state.history) {
                 updateHistory(state.history);
             }
             
-            // Малюємо графік
+            // Графік
             drawChart(state);
         });
         
@@ -1257,7 +1118,6 @@ const htmlContent = `<!DOCTYPE html>
                 const x = canvas.width * progress;
                 const y = canvas.height - (canvas.height * progress * 0.7);
                 
-                // Лінія графіка
                 ctx.beginPath();
                 ctx.strokeStyle = '#4caf50';
                 ctx.lineWidth = 3;
@@ -1283,48 +1143,38 @@ const htmlContent = `<!DOCTYPE html>
             alert(\`🎉 Ви виграли \${data.winAmount} монет!\`);
             activeBet = null;
             document.getElementById('cashoutBtn').style.display = 'none';
+            loadUser();
         });
         
-        // АДМІНКА
+        // Завантаження користувача
         async function loadUser() {
             try {
                 const res = await fetch('/api/user', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: user.id, username: user.username })
+                    body: JSON.stringify({ 
+                        id: user.id, 
+                        username: user.username,
+                        first_name: user.first_name 
+                    })
                 });
                 const userData = await res.json();
                 currentBalance = userData.balance;
                 userRole = userData.role;
                 
+                updateUserInfo(userData);
+                
+                // Показуємо кнопку адмінки якщо є права
                 if (userRole !== 'user') {
-                    // Додаємо кнопку VIP в навігацію
-                    const nav = document.querySelector('.nav');
-                    if (!document.querySelector('[onclick="switchTab(\'vip\')"]')) {
-                        const vipBtn = document.createElement('div');
-                        vipBtn.className = 'nav-item';
-                        vipBtn.textContent = 'Адмін';
-                        vipBtn.setAttribute('onclick', "switchTab('vip')");
-                        nav.appendChild(vipBtn);
-                    }
-                    
+                    document.getElementById('adminNavItem').style.display = 'block';
                     document.getElementById('adminLevel').textContent = userRole.toUpperCase();
                 }
             } catch (error) {
-                console.error('Помилка завантаження користувача:', error);
+                console.error('Помилка:', error);
             }
         }
         
-        function showAdminTab(tab) {
-            document.querySelectorAll('.admin-tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.admin-tab-content').forEach(c => c.style.display = 'none');
-            
-            event.target.classList.add('active');
-            document.getElementById('admin' + tab.charAt(0).toUpperCase() + tab.slice(1) + 'Tab').style.display = 'block';
-            
-            if (tab === 'users') loadAdminUsers();
-        }
-        
+        // Адмінка - завантаження користувачів
         function loadAdminUsers() {
             socket.emit('adminGetUsers', { adminId: user.id });
         }
@@ -1336,37 +1186,36 @@ const htmlContent = `<!DOCTYPE html>
             container.innerHTML = users.map(u => \`
                 <div class="admin-user-card">
                     <div class="admin-user-header">
-                        <span class="admin-user-name">\${u.username}</span>
+                        <span class="admin-user-name">\${u.first_name || u.username || 'Гравець'}</span>
                         <span class="admin-user-role role-badge-\${u.role}">\${u.role}</span>
                     </div>
                     
-                    <div class="admin-slider">
-                        <span>Баланс: \${u.balance}</span>
-                        <input type="range" min="0" max="100000" value="\${u.balance}" onchange="setBalance(\${u.id}, this.value)">
-                        <span class="admin-slider-value" id="balance_\${u.id}">\${u.balance}</span>
-                    </div>
-                    
                     <div class="admin-controls">
+                        <button class="admin-control green" onclick="setBalance(\${u.id}, prompt('Новий баланс:', \${u.balance}))">
+                            💰 \${u.balance}
+                        </button>
+                        <button class="admin-control red" onclick="banUser(\${u.id}, prompt('Годин бану:', 24))">
+                            🔨 Бан
+                        </button>
+                        <button class="admin-control blue" onclick="muteUser(\${u.id}, prompt('Годин муту:', 1))">
+                            🔇 Мут
+                        </button>
                         \${userRole === 'owner' ? \`
-                            <select onchange="setRole(\${u.id}, this.value)" style="grid-column: span 2; padding: 8px; background: #151a2c; border: none; border-radius: 8px; color: white; margin-bottom: 8px;">
+                            <select onchange="setRole(\${u.id}, this.value)" style="grid-column: span 2; padding: 8px; background: #151a2c; border: none; border-radius: 8px; color: white; margin-top: 8px;">
                                 <option value="user" \${u.role === 'user' ? 'selected' : ''}>👤 Користувач</option>
                                 <option value="helper" \${u.role === 'helper' ? 'selected' : ''}>🟢 Хелпер (рівень 1)</option>
                                 <option value="moderator" \${u.role === 'moderator' ? 'selected' : ''}>🔵 Модератор (рівень 2)</option>
                                 <option value="owner" \${u.role === 'owner' ? 'selected' : ''}>👑 Власник (рівень 3)</option>
                             </select>
                         \` : ''}
-                        
-                        <button class="admin-control green" onclick="setBalance(\${u.id}, prompt('Новий баланс:', \${u.balance))">💰 Змінити баланс</button>
-                        <button class="admin-control red" onclick="banUser(\${u.id}, prompt('Годин бану:', 24))">🔨 Бан</button>
-                        <button class="admin-control blue" onclick="muteUser(\${u.id}, prompt('Годин муту:', 1))">🔇 Мут</button>
-                        <button class="admin-control purple" onclick="unbanUser(\${u.id})">✅ Розбан</button>
                     </div>
                 </div>
             \`).join('');
         });
         
+        // Функції адмінки
         window.setBalance = (userId, balance) => {
-            socket.emit('adminSetBalance', { adminId: user.id, userId, balance: parseInt(balance) });
+            if (balance) socket.emit('adminSetBalance', { adminId: user.id, userId, balance: parseInt(balance) });
         };
         
         window.setRole = (userId, role) => {
@@ -1381,15 +1230,20 @@ const htmlContent = `<!DOCTYPE html>
             if (hours) socket.emit('adminMute', { adminId: user.id, userId, hours: parseInt(hours) });
         };
         
-        window.unbanUser = (userId) => {
-            socket.emit('adminUnban', { adminId: user.id, userId });
-        };
-        
         window.forceCrash = () => {
             if (confirm('Точно вибухнути?')) {
                 socket.emit('adminForceCrash', { adminId: user.id });
             }
         };
+        
+        // Пошук
+        document.getElementById('adminSearch')?.addEventListener('input', (e) => {
+            const search = e.target.value.toLowerCase();
+            document.querySelectorAll('.admin-user-card').forEach(card => {
+                const name = card.querySelector('.admin-user-name')?.textContent.toLowerCase() || '';
+                card.style.display = name.includes(search) ? 'block' : 'none';
+            });
+        });
         
         // Слайдери
         document.getElementById('minCrash')?.addEventListener('input', (e) => {
@@ -1404,15 +1258,7 @@ const htmlContent = `<!DOCTYPE html>
             document.getElementById('houseEdgeValue').textContent = e.target.value + '%';
         });
         
-        // Пошук адмінів
-        document.getElementById('adminSearch')?.addEventListener('input', (e) => {
-            const search = e.target.value.toLowerCase();
-            document.querySelectorAll('.admin-user-card').forEach(card => {
-                const name = card.querySelector('.admin-user-name')?.textContent.toLowerCase() || '';
-                card.style.display = name.includes(search) ? 'block' : 'none';
-            });
-        });
-        
+        // Запуск
         loadUser();
     </script>
 </body>
